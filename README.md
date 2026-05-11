@@ -52,6 +52,13 @@ npm run dev
 - `.env` 파일은 저장소에 올리지 않습니다.
 - API key, DB 접속 문자열, 비밀번호는 commit하지 않습니다.
 
+## 배포
+
+- Frontend: Cloudflare Pages (`https://contextnews-ai.pages.dev`)
+- Backend: Render
+
+Cloudflare Pages 배포 설정은 `docs/deployment/cloudflare-pages.md`를 참고합니다.
+
 ## License
 
 MIT License
