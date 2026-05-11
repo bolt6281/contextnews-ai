@@ -42,6 +42,7 @@ Thumbs.db
 *.pdf
 AI_NEWS_SUMMARY_PROJECT_PLAN.md
 docs/planning/
+docs/deployment/
 
 # Temporary files
 tmp/
