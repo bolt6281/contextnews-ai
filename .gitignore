@@ -1,0 +1,48 @@
+# Environment variables and secrets
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+backend/.venv/
+backend/.coverage
+backend/htmlcov/
+
+# Node / frontend
+node_modules/
+dist/
+build/
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# Logs
+*.log
+logs/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Local database files
+*.db
+*.sqlite
+*.sqlite3
+
+# Local assignment/reference files not intended for public repo
+*.pdf
+AI_NEWS_SUMMARY_PROJECT_PLAN.md
+docs/planning/
+
+# Temporary files
+tmp/
+temp/
