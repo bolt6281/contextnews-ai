@@ -19,7 +19,7 @@
 | Backend | Python, FastAPI |
 | Database | Supabase Postgres |
 | News API | Naver News Search API |
-| Deploy | Vercel, Render |
+| Deploy | Cloudflare Pages, Render |
 
 ## 실행 방법
 
