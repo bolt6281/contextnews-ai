@@ -13,3 +13,7 @@ def strip_html(value: str | None) -> str:
     without_tags = HTML_TAG_RE.sub(" ", value)
     unescaped = html.unescape(without_tags)
     return WHITESPACE_RE.sub(" ", unescaped).strip()
+
+
+def normalize_for_match(value: str | None) -> str:
+    return strip_html(value).casefold()
