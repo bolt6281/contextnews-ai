@@ -18,7 +18,7 @@
 | Frontend | React, Vite, TypeScript |
 | Backend | Python, FastAPI |
 | Database | Supabase Postgres |
-| News API | Naver News Search API |
+| News API | Google News RSS |
 | Deploy | Cloudflare Pages, Render |
 
 ## 실행 방법
@@ -50,7 +50,10 @@ npm run dev
 주의:
 
 - `.env` 파일은 저장소에 올리지 않습니다.
-- API key, DB 접속 문자열, 비밀번호는 commit하지 않습니다.
+- DB 접속 문자열, 비밀번호는 commit하지 않습니다.
+- Google News RSS는 API key 없이 동작합니다.
+- `NEWS_PROVIDER=sample`은 외부 호출 없이 테스트 데이터를 반환합니다.
+- `NEWS_PROVIDER=google_news_rss`는 Google News RSS를 호출합니다.
 
 ## License
 
