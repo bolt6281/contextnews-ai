@@ -1,127 +1,137 @@
-from __future__ import annotations
-
 import json
-import sqlite3
 
 from fastapi import APIRouter, Depends, HTTPException, status
 
-from ..database import get_connection
-from ..main import get_current_user
-from ..schemas import DashboardResponse
-
+from app.database import db_session
+from app.dependencies import get_current_user
+from app.services.worker_status_service import mark_stale_workers_offline
 
 router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
 
 
-def parse_json_list(value: str | None) -> list[str]:
-    if not value:
-        return []
-    try:
-        parsed = json.loads(value)
-    except json.JSONDecodeError:
-        return []
-    return parsed if isinstance(parsed, list) else []
+@router.get("")
+def dashboard(user: dict = Depends(get_current_user)):
+    mark_stale_workers_offline()
+    with db_session() as conn:
+        interests = conn.execute(
+            """
+            SELECT id, keyword, description, lookback_days, created_at
+            FROM interests
+            WHERE user_id = ?
+            ORDER BY created_at DESC
+            """,
+            (user["id"],),
+        ).fetchall()
+        pending = conn.execute(
+            "SELECT COUNT(*) AS count FROM ai_jobs WHERE user_id = ? AND status IN ('pending', 'processing')",
+            (user["id"],),
+        ).fetchone()["count"]
+        candidates = conn.execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM candidate_articles
+            JOIN interests ON interests.id = candidate_articles.interest_id
+            WHERE interests.user_id = ?
+            """,
+            (user["id"],),
+        ).fetchone()["count"]
+        scraps = conn.execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM article_scraps
+            JOIN candidate_articles ON candidate_articles.id = article_scraps.candidate_article_id
+            JOIN interests ON interests.id = candidate_articles.interest_id
+            WHERE article_scraps.user_id = ? AND interests.user_id = ?
+            """,
+            (user["id"], user["id"]),
+        ).fetchone()["count"]
+        items = conn.execute(
+            """
+            SELECT
+              candidate_articles.id AS candidate_article_id,
+              articles.id AS article_id,
+              interests.id AS interest_id,
+              articles.title,
+              articles.source,
+              articles.url,
+              articles.description,
+              articles.published_at,
+              interests.keyword,
+              ai_decisions.summary,
+              ai_decisions.bullet_points,
+              ai_decisions.reason AS decision_reason,
+              ai_decisions.created_at AS decided_at,
+              article_scraps.created_at AS scrapped_at,
+              article_reads.read_at
+            FROM ai_decisions
+            JOIN candidate_articles ON candidate_articles.id = ai_decisions.candidate_article_id
+            JOIN articles ON articles.id = candidate_articles.article_id
+            JOIN interests ON interests.id = candidate_articles.interest_id
+            LEFT JOIN article_scraps
+              ON article_scraps.candidate_article_id = candidate_articles.id
+             AND article_scraps.user_id = interests.user_id
+            LEFT JOIN article_reads
+              ON article_reads.article_id = articles.id
+             AND article_reads.user_id = interests.user_id
+            WHERE interests.user_id = ? AND ai_decisions.accepted = 1
+            ORDER BY articles.published_at DESC
+            """,
+            (user["id"],),
+        ).fetchall()
+        worker = conn.execute(
+            "SELECT worker_id, status, last_seen_at, processed_count FROM ai_workers ORDER BY updated_at DESC LIMIT 1"
+        ).fetchone()
 
+    parsed_items = []
+    for row in items:
+        item = dict(row)
+        item["bullet_points"] = json.loads(item["bullet_points"] or "[]")
+        item["is_read"] = item["read_at"] is not None
+        item["is_scrapped"] = item["scrapped_at"] is not None
+        parsed_items.append(item)
 
-def serialize_article(row: sqlite3.Row) -> dict:
-    scrapped_at = row["scrapped_at"]
     return {
-        "candidate_article_id": row["candidate_article_id"],
-        "interest_id": row["interest_id"],
-        "article_id": row["article_id"],
-        "title": row["title"],
-        "url": row["url"],
-        "source": row["source"],
-        "description": row["description"],
-        "published_at": row["published_at"],
-        "summary": row["summary"],
-        "bullet_points": parse_json_list(row["bullet_points"]),
-        "matched_keywords": parse_json_list(row["matched_keywords"]),
-        "is_read": row["read_at"] is not None,
-        "read_at": row["read_at"],
-        "is_scrapped": scrapped_at is not None,
-        "scrapped_at": scrapped_at,
+        "user": {"id": user["id"], "email": user["email"], "display_name": user["display_name"]},
+        "interests": [dict(row) for row in interests],
+            "stats": {
+                "interest_count": len(interests),
+                "candidate_articles": candidates,
+                "pending_ai_jobs": pending,
+                "accepted_articles": len(parsed_items),
+                "scrapped_articles": scraps,
+            },
+        "worker": dict(worker) if worker else {"status": "offline"},
+        "items": parsed_items,
     }
 
 
-def dashboard_articles(db: sqlite3.Connection, user_id: int, scrapped_only: bool = False) -> list[dict]:
-    where_scrap = "AND scraps.id IS NOT NULL" if scrapped_only else ""
-    rows = db.execute(
-        f"""
-        SELECT
-            candidate_articles.id AS candidate_article_id,
-            candidate_articles.interest_id,
-            candidate_articles.matched_keywords,
-            articles.id AS article_id,
-            articles.title,
-            articles.url,
-            articles.source,
-            articles.description,
-            articles.published_at,
-            ai_decisions.summary,
-            ai_decisions.bullet_points,
-            article_reads.read_at,
-            scraps.created_at AS scrapped_at
-        FROM candidate_articles
-        JOIN interests ON interests.id = candidate_articles.interest_id
-        JOIN articles ON articles.id = candidate_articles.article_id
-        JOIN ai_decisions ON ai_decisions.candidate_article_id = candidate_articles.id
-        LEFT JOIN article_reads
-            ON article_reads.article_id = articles.id AND article_reads.user_id = interests.user_id
-        LEFT JOIN scraps
-            ON scraps.candidate_article_id = candidate_articles.id AND scraps.user_id = interests.user_id
-        WHERE interests.user_id = ? AND ai_decisions.accepted = 1
-        {where_scrap}
-        ORDER BY COALESCE(articles.published_at, articles.created_at) DESC, candidate_articles.id DESC
-        """,
-        (user_id,),
-    ).fetchall()
-    return [serialize_article(row) for row in rows]
-
-
-@router.get("", response_model=DashboardResponse)
-def dashboard(current_user: sqlite3.Row = Depends(get_current_user)) -> DashboardResponse:
-    with get_connection() as db:
-        interests = [
-            dict(row)
-            for row in db.execute(
-                "SELECT id, keyword, description, lookback_days, created_at FROM interests WHERE user_id = ? ORDER BY id",
-                (current_user["id"],),
-            ).fetchall()
-        ]
-        workers = [
-            dict(row)
-            for row in db.execute(
-                "SELECT worker_name, last_seen_at, processed_count, status FROM ai_workers ORDER BY worker_name"
-            ).fetchall()
-        ]
-        pending_count = db.execute("SELECT COUNT(*) AS count FROM ai_jobs WHERE status = 'pending'").fetchone()["count"]
-        articles = dashboard_articles(db, current_user["id"])
-        scrapped_articles = dashboard_articles(db, current_user["id"], scrapped_only=True)
-
-    return DashboardResponse(
-        interests=interests,
-        articles=articles,
-        pending_ai_jobs=pending_count,
-        ai_workers=workers,
-        scrapped_articles=scrapped_articles,
-    )
-
-
-@router.post("/articles/{article_id}/read", status_code=status.HTTP_201_CREATED)
-def mark_read(article_id: int, current_user: sqlite3.Row = Depends(get_current_user)) -> dict[str, str]:
-    with get_connection() as db:
-        article = db.execute("SELECT id FROM articles WHERE id = ?", (article_id,)).fetchone()
-        if article is None:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Article not found")
-
-        db.execute(
+@router.post("/articles/{article_id}/read")
+def mark_article_read(article_id: int, user: dict = Depends(get_current_user)):
+    with db_session() as conn:
+        article = conn.execute(
             """
-            INSERT INTO article_reads (user_id, article_id)
-            VALUES (?, ?)
-            ON CONFLICT(user_id, article_id) DO UPDATE SET read_at = CURRENT_TIMESTAMP
+            SELECT articles.id
+            FROM articles
+            JOIN candidate_articles ON candidate_articles.article_id = articles.id
+            JOIN ai_decisions ON ai_decisions.candidate_article_id = candidate_articles.id
+            JOIN interests ON interests.id = candidate_articles.interest_id
+            WHERE articles.id = ?
+              AND interests.user_id = ?
+              AND ai_decisions.accepted = 1
+            LIMIT 1
             """,
-            (current_user["id"], article_id),
-        )
+            (article_id, user["id"]),
+        ).fetchone()
+        if article is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="열람 가능한 뉴스를 찾지 못했습니다.")
 
-    return {"status": "ok"}
+        conn.execute(
+            "INSERT OR IGNORE INTO article_reads (user_id, article_id) VALUES (?, ?)",
+            (user["id"], article_id),
+        )
+        read = conn.execute(
+            "SELECT read_at FROM article_reads WHERE user_id = ? AND article_id = ?",
+            (user["id"], article_id),
+        ).fetchone()
+
+    return {"article_id": article_id, "is_read": True, "read_at": read["read_at"]}

@@ -1,60 +1,114 @@
-import importlib
-import json
-import sys
-from pathlib import Path
-
 from fastapi.testclient import TestClient
 
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+def test_delete_interest_removes_owner_interest_and_pending_job(tmp_path, monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'contextnews-test.db'}")
+
+    from app.config import get_settings
+    from app.main import create_app
+
+    get_settings.cache_clear()
+    app = create_app()
+
+    with TestClient(app) as client:
+        owner_headers = _register(client, "owner@example.com")
+        other_headers = _register(client, "other@example.com")
+
+        created = client.post(
+            "/api/interests",
+            headers=owner_headers,
+            json={
+                "keyword": "엔비디아",
+                "description": "주가와 실적 관련 뉴스만 보고 싶다",
+                "lookback_days": 7,
+            },
+        )
+        assert created.status_code == 200
+        interest_id = created.json()["id"]
+
+        forbidden = client.delete(f"/api/interests/{interest_id}", headers=other_headers)
+        assert forbidden.status_code == 404
+
+        deleted = client.delete(f"/api/interests/{interest_id}", headers=owner_headers)
+        assert deleted.status_code == 200
+        assert deleted.json() == {"ok": True, "interest_id": interest_id}
+
+        interests = client.get("/api/interests", headers=owner_headers)
+        assert interests.status_code == 200
+        assert interests.json() == {"interests": []}
+
+        dashboard = client.get("/api/dashboard", headers=owner_headers)
+        assert dashboard.status_code == 200
+        assert dashboard.json()["stats"]["pending_ai_jobs"] == 0
 
 
-def build_client(tmp_path, monkeypatch):
-    monkeypatch.setenv("DATABASE_URL", str(tmp_path / "test.db"))
-    from app import database
-    from app import main
+def test_delete_interest_removes_pending_article_decision_jobs(tmp_path, monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'contextnews-test.db'}")
 
-    importlib.reload(database)
-    importlib.reload(main)
-    main.init_db()
-    return TestClient(main.app), database
+    from app.config import get_settings
+    from app.database import db_session
+    from app.main import create_app
+    from app.services.ai_job_service import create_ai_job
+
+    get_settings.cache_clear()
+    app = create_app()
+
+    with TestClient(app) as client:
+        owner_headers = _register(client, "owner-article-job@example.com")
+
+        created = client.post(
+            "/api/interests",
+            headers=owner_headers,
+            json={
+                "keyword": "엔비디아",
+                "description": "주가와 실적 관련 뉴스만 보고 싶다",
+                "lookback_days": 7,
+            },
+        )
+        assert created.status_code == 200
+        interest_id = created.json()["id"]
+
+        with db_session() as conn:
+            user_id = conn.execute(
+                "SELECT user_id FROM interests WHERE id = ?",
+                (interest_id,),
+            ).fetchone()["user_id"]
+
+        article_job_id = create_ai_job(
+            user_id,
+            "article_decision",
+            {
+                "candidate_article_id": 123,
+                "interest": {
+                    "id": interest_id,
+                    "keyword": "엔비디아",
+                    "description": "주가와 실적 관련 뉴스만 보고 싶다",
+                    "lookback_days": 7,
+                },
+                "article": {"title": "엔비디아 실적", "description": "실적 개선"},
+                "matched_keywords": ["실적"],
+            },
+        )
+
+        deleted = client.delete(f"/api/interests/{interest_id}", headers=owner_headers)
+        assert deleted.status_code == 200
+
+        with db_session() as conn:
+            remaining = conn.execute(
+                "SELECT id FROM ai_jobs WHERE id = ?",
+                (article_job_id,),
+            ).fetchone()
+        assert remaining is None
 
 
-def register(client, email):
+def _register(client: TestClient, email: str) -> dict[str, str]:
     response = client.post(
         "/api/auth/register",
-        json={"email": email, "password": "password123", "display_name": email.split("@")[0]},
+        json={
+            "email": email,
+            "password": "password123",
+            "display_name": "테스트",
+        },
     )
-    assert response.status_code == 201
-    return response.json()["token"]
-
-
-def test_interest_crud_is_scoped_to_current_user(tmp_path, monkeypatch):
-    client, database = build_client(tmp_path, monkeypatch)
-    user_token = register(client, "user@example.com")
-    other_token = register(client, "other@example.com")
-
-    created = client.post(
-        "/api/interests",
-        headers={"Authorization": f"Bearer {user_token}"},
-        json={"keyword": "AI", "description": "반도체와 전력 인프라", "lookback_days": 14},
-    )
-
-    assert created.status_code == 201
-    assert created.json()["keyword"] == "AI"
-    assert created.json()["lookback_days"] == 14
-    assert "hidden_keywords" not in created.json()
-
-    assert client.get("/api/interests", headers={"Authorization": f"Bearer {user_token}"}).json()[0]["keyword"] == "AI"
-    assert client.get("/api/interests", headers={"Authorization": f"Bearer {other_token}"}).json() == []
-    assert client.delete(f"/api/interests/{created.json()['id']}", headers={"Authorization": f"Bearer {other_token}"}).status_code == 404
-
-    with database.get_connection() as db:
-        job = db.execute("SELECT job_type, payload FROM ai_jobs WHERE job_type = 'hidden_keywords'").fetchone()
-    assert job["job_type"] == "hidden_keywords"
-    assert json.loads(job["payload"])["interest_id"] == created.json()["id"]
-
-    deleted = client.delete(f"/api/interests/{created.json()['id']}", headers={"Authorization": f"Bearer {user_token}"})
-
-    assert deleted.status_code == 204
-    assert client.get("/api/interests", headers={"Authorization": f"Bearer {user_token}"}).json() == []
+    assert response.status_code == 200
+    return {"Authorization": f"Bearer {response.json()['session_token']}"}

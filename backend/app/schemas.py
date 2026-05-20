@@ -1,34 +1,31 @@
-from typing import Any
-
-from pydantic import BaseModel, EmailStr, Field, HttpUrl
+from pydantic import BaseModel, EmailStr, Field
 
 
 class RegisterRequest(BaseModel):
     email: EmailStr
     password: str = Field(min_length=8)
-    display_name: str = Field(min_length=1, max_length=80)
+    display_name: str = Field(min_length=2, max_length=20)
 
 
 class LoginRequest(BaseModel):
     email: EmailStr
-    password: str
+    password: str = Field(min_length=1)
 
 
 class UserResponse(BaseModel):
     id: int
-    email: EmailStr
+    email: str
     display_name: str
 
 
-class AuthResponse(BaseModel):
-    token: str
-    user: UserResponse
+class AuthResponse(UserResponse):
+    session_token: str
 
 
-class InterestCreate(BaseModel):
-    keyword: str = Field(min_length=1, max_length=120)
-    description: str = Field(default="", max_length=1000)
-    lookback_days: int = Field(default=7, ge=1, le=365)
+class InterestCreateRequest(BaseModel):
+    keyword: str = Field(min_length=1, max_length=30)
+    description: str = Field(min_length=10, max_length=300)
+    lookback_days: int = Field(default=3, ge=1, le=30)
 
 
 class InterestResponse(BaseModel):
@@ -37,42 +34,33 @@ class InterestResponse(BaseModel):
     description: str
     lookback_days: int
     created_at: str
-
-
-class ArticleInput(BaseModel):
-    title: str = Field(min_length=1, max_length=500)
-    url: HttpUrl
-    source: str | None = Field(default=None, max_length=200)
-    description: str | None = None
-    published_at: str | None = None
-    summary: str | None = None
+    ai_job_id: int | None = None
+    ai_job_status: str | None = None
 
 
 class RefreshRequest(BaseModel):
-    interest_id: int | None = None
-    articles: list[ArticleInput] = Field(default_factory=list)
+    limit_per_interest: int = Field(default=10, ge=1, le=20)
 
 
-class RefreshJobResponse(BaseModel):
-    id: int
-    interest_id: int
-    search_terms: list[str]
-    candidate_count: int
+class ScrapCreateRequest(BaseModel):
+    candidate_article_id: int
 
 
-class RefreshResponse(BaseModel):
-    status: str
-    pending_ai_jobs: int
-    jobs: list[RefreshJobResponse]
+class ClaimRequest(BaseModel):
+    worker_id: str
+    limit: int = Field(default=1, ge=1, le=5)
 
 
-class ScrapCreate(BaseModel):
-    candidate_article_id: int = Field(gt=0)
+class CompleteJobRequest(BaseModel):
+    worker_id: str
+    result: dict
 
 
-class DashboardResponse(BaseModel):
-    interests: list[dict[str, Any]]
-    articles: list[dict[str, Any]]
-    pending_ai_jobs: int
-    ai_workers: list[dict[str, Any]]
-    scrapped_articles: list[dict[str, Any]]
+class FailJobRequest(BaseModel):
+    worker_id: str
+    error_message: str
+
+
+class HeartbeatRequest(BaseModel):
+    worker_id: str
+    status: str = "online"
