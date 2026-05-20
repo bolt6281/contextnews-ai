@@ -118,6 +118,16 @@ def init_db() -> None:
                 FOREIGN KEY (article_id) REFERENCES articles(id) ON DELETE CASCADE,
                 UNIQUE (user_id, article_id)
             );
+
+            CREATE TABLE IF NOT EXISTS scraps (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                candidate_article_id INTEGER NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+                FOREIGN KEY (candidate_article_id) REFERENCES candidate_articles(id) ON DELETE CASCADE,
+                UNIQUE (user_id, candidate_article_id)
+            );
             """
         )
         ensure_column(db, "interests", "lookback_days", "INTEGER NOT NULL DEFAULT 7")

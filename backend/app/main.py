@@ -110,3 +110,12 @@ def logout(response: Response, token: str = Depends(get_token)) -> dict[str, str
 
     response.delete_cookie("session_token")
     return {"status": "ok"}
+
+
+from .routers import dashboard, interests, refresh, scraps
+
+
+app.include_router(interests.router)
+app.include_router(dashboard.router)
+app.include_router(refresh.router)
+app.include_router(scraps.router)
