@@ -1,142 +1,135 @@
-from __future__ import annotations
-
 import html
 import json
-import os
 import re
-from dataclasses import dataclass
-from datetime import UTC
+import xml.etree.ElementTree as ET
 from email.utils import parsedate_to_datetime
 from urllib.parse import urlencode
-import xml.etree.ElementTree as ET
 
 import httpx
 
+from app.config import get_settings
 from app.services.sample_data import sample_news
 
-try:
-    from app.config import get_settings
-except ModuleNotFoundError:
-    @dataclass(frozen=True)
-    class _FallbackSettings:
-        news_provider: str = os.getenv("NEWS_PROVIDER", "google_news_rss")
-        news_fetch_limit: int = int(os.getenv("NEWS_FETCH_LIMIT", "10"))
-        naver_client_id: str = os.getenv("NAVER_CLIENT_ID", "")
-        naver_client_secret: str = os.getenv("NAVER_CLIENT_SECRET", "")
 
-    def get_settings() -> _FallbackSettings:
-        return _FallbackSettings()
-
-
-GOOGLE_NEWS_RSS_URL = "https://news.google.com/rss/search"
-NAVER_NEWS_URL = "https://openapi.naver.com/v1/search/news.json"
 TAG_RE = re.compile(r"<[^>]+>")
-SPACE_RE = re.compile(r"\s+")
+GOOGLE_NEWS_RSS_URL = "https://news.google.com/rss/search"
 
 
-def _clean_text(value: str | None) -> str:
-    if not value:
-        return ""
-    without_tags = TAG_RE.sub(" ", value)
-    unescaped = html.unescape(without_tags)
-    return SPACE_RE.sub(" ", unescaped).strip()
+def _clean(value: str) -> str:
+    # RSS title/description에 섞인 HTML 태그와 entity를 화면 표시용 문자열로 정리한다.
+    return TAG_RE.sub("", html.unescape(value or "")).strip()
 
 
-def _normalize_published_at(value: str | None) -> str:
-    if not value:
-        return ""
-    try:
-        parsed = parsedate_to_datetime(value)
-    except (TypeError, ValueError):
-        return value.strip()
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=UTC)
-    return parsed.astimezone(UTC).isoformat().replace("+00:00", "Z")
+async def fetch_news(keyword: str, limit: int, lookback_days: int = 7) -> list[dict]:
+    # refresh API가 호출하는 뉴스 수집 진입점이다. provider는 backend 설정값을 따른다.
+    settings = get_settings()
+    provider = settings.news_provider.lower()
+
+    if provider == "sample":
+        return sample_news(keyword)[:limit]
+
+    if provider == "naver" and settings.naver_client_id and settings.naver_client_secret:
+        return await _fetch_naver_news(keyword, limit)
+
+    return await _fetch_google_news(keyword, limit, lookback_days)
 
 
-def _build_google_news_url(keyword: str, lookback_days: int) -> str:
-    query = keyword.strip()
-    if not query:
-        raise ValueError("keyword is required")
-    if lookback_days < 1:
-        raise ValueError("lookback_days must be greater than 0")
+async def _fetch_naver_news(keyword: str, limit: int) -> list[dict]:
+    # Naver provider를 사용할 때도 Google RSS와 같은 article dict 구조로 정규화한다.
+    settings = get_settings()
+    headers = {
+        "X-Naver-Client-Id": settings.naver_client_id,
+        "X-Naver-Client-Secret": settings.naver_client_secret,
+    }
+    params = {"query": keyword, "display": limit, "sort": "date"}
+    async with httpx.AsyncClient(timeout=10) as client:
+        response = await client.get("https://openapi.naver.com/v1/search/news.json", headers=headers, params=params)
+        response.raise_for_status()
+        payload = response.json()
+
+    normalized: list[dict] = []
+    for item in payload.get("items", []):
+        published_at = parsedate_to_datetime(item["pubDate"]).isoformat()
+        normalized.append(
+            {
+                "title": _clean(item.get("title", "")),
+                "source": "Naver News",
+                "url": item.get("originallink") or item.get("link"),
+                "description": _clean(item.get("description", "")),
+                "published_at": published_at,
+                "raw_payload": json.dumps(item, ensure_ascii=False),
+            }
+        )
+    return normalized
+
+
+async def _fetch_google_news(keyword: str, limit: int, lookback_days: int) -> list[dict]:
+    # Google News RSS는 API key 없이 keyword와 lookback 기간 조건으로 후보 뉴스를 가져온다.
     params = {
-        "q": f"{query} when:{lookback_days}d",
+        "q": f"{keyword} when:{lookback_days}d",
         "hl": "ko",
         "gl": "KR",
         "ceid": "KR:ko",
     }
-    return f"{GOOGLE_NEWS_RSS_URL}?{urlencode(params)}"
+    url = f"{GOOGLE_NEWS_RSS_URL}?{urlencode(params)}"
+    headers = {"User-Agent": "ContextNews/0.1"}
 
-
-def _parse_google_item(item: ET.Element) -> dict[str, str]:
-    source = item.find("source")
-    article = {
-        "title": _clean_text(item.findtext("title")),
-        "url": (item.findtext("link") or "").strip(),
-        "source": _clean_text(source.text if source is not None else ""),
-        "description": _clean_text(item.findtext("description")),
-        "published_at": _normalize_published_at(item.findtext("pubDate")),
-    }
-    return {**article, "raw_payload": json.dumps(article, ensure_ascii=False)}
-
-
-def _parse_google_rss(xml_text: str) -> list[dict[str, str]]:
-    root = ET.fromstring(xml_text)
-    return [_parse_google_item(item) for item in root.findall("./channel/item") if item.findtext("link")]
-
-
-def _parse_naver_item(item: dict) -> dict[str, str]:
-    article = {
-        "title": _clean_text(item.get("title")),
-        "url": item.get("originallink") or item.get("link") or "",
-        "source": "Naver News",
-        "description": _clean_text(item.get("description")),
-        "published_at": _normalize_published_at(item.get("pubDate")),
-    }
-    return {**article, "raw_payload": json.dumps(item, ensure_ascii=False)}
-
-
-async def _fetch_google_news(keyword: str, limit: int, lookback_days: int) -> list[dict[str, str]]:
-    url = _build_google_news_url(keyword, lookback_days)
-    async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
-        response = await client.get(url, headers={"User-Agent": "contextnews-ai/0.1"})
+    async with httpx.AsyncClient(timeout=12, follow_redirects=True) as client:
+        response = await client.get(url, headers=headers)
         response.raise_for_status()
-    return _parse_google_rss(response.text)[:limit]
+
+    root = ET.fromstring(response.text)
+    items = root.findall("./channel/item")
+    normalized: list[dict] = []
+
+    for item in items[:limit]:
+        normalized_item = _parse_google_item(item)
+        if normalized_item is not None:
+            normalized.append(normalized_item)
+
+    return normalized
 
 
-async def _fetch_naver_news(keyword: str, limit: int) -> list[dict[str, str]]:
-    settings = get_settings()
-    if not settings.naver_client_id or not settings.naver_client_secret:
-        raise ValueError("NAVER_CLIENT_ID and NAVER_CLIENT_SECRET are required for naver provider")
+def _parse_google_item(item: ET.Element) -> dict | None:
+    # RSS item 하나를 backend가 저장하는 article 필드 구조로 변환한다.
+    raw_title = _clean(item.findtext("title", default=""))
+    link = item.findtext("link", default="").strip()
+    pub_date = item.findtext("pubDate", default="").strip()
+    source = _clean(item.findtext("source", default="Google News")) or "Google News"
+    description = _clean(item.findtext("description", default=""))
 
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        response = await client.get(
-            NAVER_NEWS_URL,
-            params={"query": keyword, "display": limit, "sort": "date"},
-            headers={
-                "X-Naver-Client-Id": settings.naver_client_id,
-                "X-Naver-Client-Secret": settings.naver_client_secret,
+    if not raw_title or not link or not pub_date:
+        return None
+
+    try:
+        published_at = parsedate_to_datetime(pub_date).isoformat()
+    except (TypeError, ValueError):
+        return None
+
+    title = _strip_source_suffix(raw_title, source)
+    return {
+        "title": title,
+        "source": source,
+        "url": link,
+        "description": description or title,
+        "published_at": published_at,
+        "raw_payload": json.dumps(
+            {
+                "provider": "google_news",
+                "title": raw_title,
+                "source": source,
+                "link": link,
+                "pubDate": pub_date,
+                "description": description,
             },
-        )
-        response.raise_for_status()
-    return [_parse_naver_item(item) for item in response.json().get("items", [])]
+            ensure_ascii=False,
+        ),
+    }
 
 
-async def fetch_news(
-    keyword: str,
-    limit: int | None = None,
-    lookback_days: int = 7,
-    provider: str | None = None,
-) -> list[dict[str, str]]:
-    settings = get_settings()
-    selected_provider = provider or settings.news_provider
-    fetch_limit = limit or settings.news_fetch_limit
-
-    if selected_provider == "sample":
-        return sample_news()[:fetch_limit]
-    if selected_provider == "google_news_rss":
-        return await _fetch_google_news(keyword, fetch_limit, lookback_days)
-    if selected_provider == "naver":
-        return await _fetch_naver_news(keyword, fetch_limit)
-    raise ValueError(f"Unsupported news provider: {selected_provider}")
+def _strip_source_suffix(title: str, source: str) -> str:
+    # Google RSS 제목 끝의 언론사 suffix는 source 필드와 중복되므로 제거한다.
+    suffix = f" - {source}"
+    if title.endswith(suffix):
+        return title[: -len(suffix)].strip()
+    return title
