@@ -1,68 +1,43 @@
-from __future__ import annotations
-
-import html
 import re
-from typing import Any
 
 
-KEYWORD_RE = re.compile(r"[0-9A-Za-z가-힣]{2,}")
-HTML_TAG_RE = re.compile(r"<[^>]+>")
-WHITESPACE_RE = re.compile(r"\s+")
+STOPWORDS = {"뉴스", "관련", "보고", "싶다", "대한", "있는", "없는", "그리고", "또는"}
 
 
-def strip_html(value: str | None) -> str:
-    if not value:
-        return ""
-    without_tags = HTML_TAG_RE.sub(" ", value)
-    unescaped = html.unescape(without_tags)
-    return WHITESPACE_RE.sub(" ", unescaped).strip()
+def generate_hidden_keywords(keyword: str, description: str) -> list[str]:
+    tokens = re.split(r"[\s,./·\-_:;()]+", description)
+    keywords: list[str] = []
+    for token in tokens:
+        clean = token.strip()
+        if len(clean) < 2 or clean in STOPWORDS:
+            continue
+        if clean not in keywords:
+            keywords.append(clean)
+        if len(keywords) >= 8:
+            break
+    if keyword not in keywords:
+        keywords.insert(0, keyword)
+    return keywords[:8]
 
 
-def unique_values(values: list[str]) -> list[str]:
-    unique: list[str] = []
-    for value in values:
-        normalized = value.strip()
-        if normalized and normalized not in unique:
-            unique.append(normalized)
-    return unique
-
-
-class MockAIAdapter:
-    def generate_hidden_keywords(self, keyword: str, additional_description: str = "") -> dict[str, Any]:
-        description_keywords = KEYWORD_RE.findall(strip_html(additional_description))
-        hidden_keywords = unique_values([keyword, *description_keywords])
-
-        return {
-            "hidden_keywords": hidden_keywords,
-            "provider": "mock",
-        }
-
-    def judge_candidate(self, article: dict[str, Any], matched_keywords: list[str]) -> dict[str, Any]:
-        accepted = bool(matched_keywords)
-        return {
-            "accepted": accepted,
-            "matched_keywords": matched_keywords,
-            "reason": "matched_keywords 기준으로 후보로 분류됨" if accepted else "매칭된 키워드가 없어 제외됨",
-            "article_url": article.get("url", ""),
-        }
-
-    def summarize(self, article: dict[str, Any]) -> dict[str, Any]:
-        title = strip_html(article.get("title", ""))
-        source = strip_html(article.get("source", ""))
-        description = strip_html(article.get("description", ""))
-        summary = description or title
-
-        return {
-            "summary": summary,
-            "bullet_points": [
-                f"제목: {title}",
-                f"출처: {source or 'unknown'}",
-                f"요약: {summary}",
-            ],
-        }
-
-    def analyze_candidate(self, article: dict[str, Any], matched_keywords: list[str]) -> dict[str, Any]:
-        return {
-            "decision": self.judge_candidate(article, matched_keywords),
-            "summary": self.summarize(article),
-        }
+def decide_article(interest: dict, article: dict, matched_keywords: list[str]) -> dict:
+    accepted = bool(matched_keywords)
+    keyword_text = ", ".join(matched_keywords[:3]) if matched_keywords else interest["keyword"]
+    title = article["title"]
+    source = article.get("source", "뉴스")
+    return {
+        "accepted": accepted,
+        "reason": f"사용자의 관심 조건과 관련된 키워드({keyword_text})가 기사에서 확인되었습니다."
+        if accepted
+        else "사용자의 관심 조건과 직접적으로 겹치는 내용이 부족합니다.",
+        "summary": f"{source}의 '{title}' 기사는 {interest['keyword']} 관련 흐름을 빠르게 확인할 수 있는 내용입니다."
+        if accepted
+        else "",
+        "bullet_points": [
+            f"관련 키워드: {keyword_text}",
+            f"관심 조건: {interest['description'][:60]}",
+            "원문 링크를 통해 자세한 내용을 확인할 수 있습니다.",
+        ]
+        if accepted
+        else [],
+    }
